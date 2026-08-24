@@ -125,8 +125,9 @@ Todos os resultados são exportados em **Excel**:
 ---
 
 ## 🌐 Infraestrutura de Apoio — Proxy Privado (Squid na VPS (AWS,GCP,Azure,Digital Ocean, Vultr)
-
 Para **rotacionar a origem** das requisições, é recomendável usar proxies **privados e autenticados**. O guia abaixo provisiona um **Squid Proxy** em uma VPS **Ubuntu (22.04/24.04 LTS)**, com **autenticação obrigatória** por usuário/senha — evitando que o servidor se torne um *open proxy* (o que geralmente violaria as políticas das VPS).
+
+> OBS: A ferramenta ainda não está habilitada para uso de usuários e senhas diferentes, por isso, para rotacionar o proxy é necessário definir a mesma senha e mesmo usuários :\
 
 ### 1. Atualizar o sistema e instalar dependências
 
