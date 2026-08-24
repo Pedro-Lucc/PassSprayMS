@@ -131,9 +131,9 @@ Todos os resultados são exportados em **Excel**:
 
 ---
 
-## 🌐 Infraestrutura de Apoio — Proxy Privado (Squid na Vultr)
+## 🌐 Infraestrutura de Apoio — Proxy Privado (Squid na VPS (AWS,GCP,Azure,Digital Ocean, Vultr)
 
-Para **rotacionar a origem** das requisições, é recomendável usar proxies **privados e autenticados**. O guia abaixo provisiona um **Squid Proxy** em uma VPS **Ubuntu (22.04/24.04 LTS)** da Vultr, com **autenticação obrigatória** por usuário/senha — evitando que o servidor se torne um *open proxy* (o que violaria as políticas da Vultr).
+Para **rotacionar a origem** das requisições, é recomendável usar proxies **privados e autenticados**. O guia abaixo provisiona um **Squid Proxy** em uma VPS **Ubuntu (22.04/24.04 LTS)**, com **autenticação obrigatória** por usuário/senha — evitando que o servidor se torne um *open proxy* (o que geralmente violaria as políticas das VPS).
 
 ### 1. Atualizar o sistema e instalar dependências
 
@@ -163,7 +163,7 @@ Substitua o conteúdo pelas diretivas abaixo:
 # Autenticação
 auth_param basic program /usr/lib/squid/basic_ncsa_auth /etc/squid/passwords
 auth_param basic children 5
-auth_param basic realm Proxy Privado Vultr
+auth_param basic realm Proxy Privado VPS
 auth_param basic credentialsttl 2 hours
 auth_param basic casesensitive on
 
@@ -201,7 +201,7 @@ sudo systemctl enable squid
 sudo ufw allow 3128/tcp
 ```
 
-> ⚠️ **Painel Web Vultr:** se houver um *Firewall Group* associado à VPS, adicione uma regra **Inbound TCP** na porta `3128`.
+> ⚠️ **Painel Web VPS:** se houver um *Firewall Group* associado à VPS, adicione uma regra **Inbound TCP** na porta `3128`.
 
 ### 6. Testar o proxy
 
