@@ -2,13 +2,6 @@
 
 > Ferramenta em **PowerShell** para **enumeração de contas** e **password spraying** contra tenants corporativos do **Microsoft Entra ID / Microsoft 365**, com suporte a **rotação de proxies autenticados**, controle de **sleep/jitter** e **janela de lockout**. Exporta todos os resultados para **planilhas Excel** organizadas por categoria.
 
-Este repositório reúne dois componentes complementares:
-
-| Componente | Arquivo | Função |
-|---|---|---|
-| **Ferramenta principal** | `enum_passs_spray.ps1` | Enumeração de usuários + password spraying no Microsoft 365 |
-| **Infraestrutura de apoio** | Guia Squid (Vultr) | Provisionamento de um proxy privado autenticado para rotação de origem |
-
 ---
 
 ## ⚠️ Aviso Legal e de Uso Ético
