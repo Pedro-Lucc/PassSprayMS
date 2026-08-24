@@ -44,7 +44,7 @@ O autor e os contribuidores **não se responsabilizam** por qualquer uso indevid
 ## 🚀 Uso
 
 ```powershell
-.\enum_passs_spray.ps1 -Domain <dominio> -UserList <arquivo> [opcoes]
+.\enum_passs_spray.ps1 -Domain <dominio> -UserList <arquivo> 
 ```
 
 ### Parâmetros
