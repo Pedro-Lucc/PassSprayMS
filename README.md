@@ -138,7 +138,7 @@ sudo apt install squid apache2-utils -y
 ### 2. Criar a base de usuários
 
 ```bash
-sudo htpasswd -c /etc/squid/passwords meu_utilizador
+sudo htpasswd -c /etc/squid/passwords <NOME_DO_USUÁRIO>
 sudo chown proxy:proxy /etc/squid/passwords
 sudo chmod 400 /etc/squid/passwords
 ```
